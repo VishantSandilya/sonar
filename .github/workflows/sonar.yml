@@ -1,0 +1,60 @@
+name: SonarQube Scan (Docker)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  sonar:
+    name: SonarQube
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start SonarQube (Docker)
+        run: |
+          docker run -d --name sonarqube -p 9000:9000 sonarqube:lts-community
+          echo "Waiting for SonarQube to be healthy..."
+          for i in {1..60}; do
+            if curl -s http://localhost:9000/api/system/health | grep -q 'GREEN'; then
+              echo "SonarQube is healthy"; break; fi; sleep 5; done
+          curl -u admin:admin -X POST 'http://localhost:9000/api/users/change_password?login=admin&previousPassword=admin&password=adminadmin' || true
+          echo "Generating token..."
+          export TOKEN=$(curl -s -u admin:adminadmin -X POST 'http://localhost:9000/api/user_tokens/generate?name=ci-token' | jq -r .token)
+          echo "SONAR_TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo "SONAR_HOST_URL=http://localhost:9000" >> $GITHUB_ENV
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install
+        run: npm ci || npm i
+
+      - name: Build (if any)
+        run: echo "No build step"
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v3
+        env:
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+
+      - name: Quality Gate (wait)
+        uses: SonarSource/sonarqube-quality-gate-action@v1.1.0
+        env:
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        with:
+          scanMetadataReportFile: .scannerwork/report-task.txt
+
+      - name: Stop SonarQube
+        if: always()
+        run: |
+          docker logs sonarqube --tail 200 || true
+          docker rm -f sonarqube || true
+
+
