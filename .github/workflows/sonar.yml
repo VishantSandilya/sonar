@@ -14,16 +14,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install tooling
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+
       - name: Start SonarQube (Docker)
         run: |
-          docker run -d --name sonarqube -p 9000:9000 sonarqube:lts-community
-          echo "Waiting for SonarQube to be healthy..."
-          for i in {1..60}; do
-            if curl -s http://localhost:9000/api/system/health | grep -q 'GREEN'; then
-              echo "SonarQube is healthy"; break; fi; sleep 5; done
-          curl -u admin:admin -X POST 'http://localhost:9000/api/users/change_password?login=admin&previousPassword=admin&password=adminadmin' || true
+          docker run -d --name sonarqube \
+            --ulimit nofile=65536:65536 \
+            --sysctl vm.max_map_count=262144 \
+            -p 9000:9000 sonarqube:lts-community
+          echo "Waiting for SonarQube Docker healthcheck (up to 10 minutes)..."
+          for i in {1..120}; do \
+            status=$(docker inspect -f '{{.State.Health.Status}}' sonarqube 2>/dev/null || echo "starting"); \
+            echo "Health: $status"; \
+            if [ "$status" = "healthy" ]; then echo "Healthy"; break; fi; \
+            sleep 5; \
+          done
+          status=$(docker inspect -f '{{.State.Health.Status}}' sonarqube 2>/dev/null || echo "unknown")
+          if [ "$status" != "healthy" ]; then
+            echo "SonarQube failed to become healthy";
+            docker logs sonarqube --tail 300 || true;
+            exit 1;
+          fi
+          echo "Waiting for HTTP endpoint..."
+          for i in {1..30}; do \
+            if curl -fsS http://localhost:9000/api/system/health | grep -q GREEN; then echo "HTTP ready"; break; fi; \
+            sleep 2; \
+          done
+          echo "Setting admin password..."
+          curl -fsS -u admin:admin -X POST 'http://localhost:9000/api/users/change_password?login=admin&previousPassword=admin&password=adminadmin' || true
           echo "Generating token..."
-          export TOKEN=$(curl -s -u admin:adminadmin -X POST 'http://localhost:9000/api/user_tokens/generate?name=ci-token' | jq -r .token)
+          TOKEN=$(curl -fsS -u admin:adminadmin -X POST 'http://localhost:9000/api/user_tokens/generate?name=ci-token' | jq -r .token)
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then echo "Failed to create token"; exit 1; fi
           echo "SONAR_TOKEN=$TOKEN" >> $GITHUB_ENV
           echo "SONAR_HOST_URL=http://localhost:9000" >> $GITHUB_ENV
 
